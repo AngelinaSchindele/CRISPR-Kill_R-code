@@ -1,0 +1,239 @@
+# Einmalig ausführen
+install.packages("stringr")
+install.packages("dplyr")
+install.packages("openxlsx", dependencies = TRUE)
+
+# Configuration
+  importFolder <- ""
+  exportFolder <- ""
+  importFileName <- ""
+  importFileType <- ".txt"
+  
+
+# Initialisierung
+  library(stringr)
+  library(dplyr)
+  library(openxlsx)
+  if(!dir.exists(exportFolder)) {
+    dir.create(exportFolder)  
+    print('Creating Export Folder')
+  }
+
+# Einlesen der Quell-Datei
+  print(paste("Importing ",importFolder,"/",importFileName,importFileType,sep=""))
+  importResultAll <- read.delim(paste(importFolder,"/",importFileName,importFileType,sep=""))
+
+print("Starting Analyses")  
+  
+# Gesamtstatistik initialisieren
+  stats <- data.frame("X" = c('AnzahlSequenzen','SummeReads'),stringsAsFactors=FALSE)
+  stats[["Gesamt"]] <- c(length(importResultAll$Count),sum(importResultAll$Count))
+
+# Wildtyp Statikstik ermitteln
+  resultWT <- filter(importResultAll, Type == "WT or Sub")
+  stats[["Wildtyp"]] <- c(length(resultWT$Count),sum(resultWT$Count))
+  
+# Laenge der WT Sequenz ermitteln
+# WTLaenge <- {str_count(resultWT[1,2],"[TAGC]+?")}
+  
+# WT-Länge eintragen!!  
+  WTLaenge <- 551
+
+
+# Insertions
+  resultIns <- filter(importResultAll, Type == "Ins")
+  #InDels extrahieren & in temp. Data Frame schreiben
+  inDelPattern <- "[TAGC]+?([-]+)[TAGC]*?" 
+  resultIns[["DelCount"]] <- {str_count(resultIns$RGEN.Treated.Sequence,inDelPattern)}
+  resultInsTemp <- filter(resultIns, DelCount > 0)
+  #Tatsaechliche Insertionen filtern
+  resultIns <- filter(resultIns, DelCount == 0)
+  resultIns[["InsSize"]] <- {resultIns$Length -WTLaenge}
+  stats[["Insertions"]] <- c(length(resultIns$Count),sum(resultIns$Count))
+  insStatistic <- summarise(group_by(resultIns,InsSize),Anzahl = n(),Reads = sum(Count))
+  
+  #Auswertung der nach Groessen-Cluster
+  getSizeCluster <- function(x) {
+    if(x < 1) return("kleiner 1 bp")
+    if(x <= 10) return("1-10 bp")
+    if(x <= 50) return("11-50 bp")
+    if(x > 50) return("groesser 50 bp")
+  }
+  ins2Statistic <- insStatistic
+  ins2Statistic[["SizeCluster"]] <- apply(ins2Statistic["InsSize"],1,function(x) getSizeCluster(x))
+  ins2Statistic <- summarise(group_by(ins2Statistic,SizeCluster),Anzahl = sum(Anzahl),Reads = sum(Reads))
+  
+  
+
+# Deletions 
+  resultDel <- filter(importResultAll, Type == "del")
+  
+  #Anzahl Deletions-Patterns pro Sequenz ermitteln
+  delPattern <- "[TAGC]+?([-]+)[TAGC]*?" 
+  resultDel[["DelCount"]] <- {str_count(resultDel$RGEN.Treated.Sequence,delPattern)}
+
+  #InDels extrahieren, InDels aus Insertionen ergaenzen & Statistik ermitteln
+  resultInDels <- rbind(resultInsTemp,filter(resultDel, DelCount > 1))
+  stats[["InDels"]] <- c(length(resultInDels$Count),sum(resultInDels$Count))
+
+  #Tatsachliche Deletions extrahieren, Laenge & Statistik ermitteln
+  resultTrueDels <- filter(resultDel, DelCount == 1)
+  resultTrueDels[["DelSize"]] <- {WTLaenge - resultTrueDels$Length}
+  stats[["Deletions"]] <- c(length(resultTrueDels$Count),sum(resultTrueDels$Count))
+  delStatistic <- summarise(group_by(resultTrueDels,DelSize),Anzahl = n(),Reads = sum(Count))
+  
+  del2Statistic <- delStatistic
+  del2Statistic[["SizeCluster"]] <- apply(del2Statistic["DelSize"],1,function(x) getSizeCluster(x))
+  del2Statistic <- summarise(group_by(del2Statistic,SizeCluster),Anzahl = sum(Anzahl),Reads = sum(Reads))
+  
+  
+
+# True Deletions Detailanalyse    
+  print("Starting Detail Analyses of Deletions")  
+  analyzeSetDels <- resultTrueDels
+  # View(analyzeSetDels)
+  
+  getDelLength <- function(x) {
+    delPos <- str_locate(x,"(-)+")
+    delLength <- delPos[2]-delPos[1]+1
+    return(delLength)
+  }
+  
+  getDeletedSeq <- function(x) {
+    delPos <- str_locate(x[2],"(-)+")
+    delLength <- delPos[2]-delPos[1]+1
+    deletedSeq <- str_sub(x[1],delPos[1],delPos[2])
+    return( deletedSeq)
+  }
+  
+  getFollowingSeq <- function(x) {
+    delPos <- str_locate(x[2],"(-)+")
+    delLength <- delPos[2]-delPos[1]+1
+    followSeq <- str_sub(x[1],delPos[1]+delLength,delPos[2]+delLength)
+    return(followSeq)
+  }
+  
+  getMHSize <- function(x) {
+    st1 <- ""; 
+    st2 <- "";
+    for (i in c(0:str_length(x[1])-1))
+    {
+      st1 <- str_sub(x[1],1,i+1)
+      st2 <- str_sub(x[2],1,i+1)
+      if (st1 != st2) {break}
+    }
+    
+    return(i)
+  }
+  
+  analyzeSetDels[["delLength"]] <- apply(analyzeSetDels[3],1,function(x) getDelLength(x))
+  analyzeSetDels[["deletedSeq"]] <- apply(analyzeSetDels[,c(2,3)],1,function(x) getDeletedSeq(x))
+  analyzeSetDels[["followingSeqWT"]] <- apply(analyzeSetDels[,c(2,3)],1,function(x) getFollowingSeq(x))
+  analyzeSetDels[["followingSeqTR"]] <- apply(analyzeSetDels[,c(3,3)],1,function(x) getFollowingSeq(x))
+  analyzeSetDels[["MHSize"]] <- apply(analyzeSetDels[,c("deletedSeq","followingSeqWT")],1,function(x) getMHSize(x))
+  # View(analyzeSetDels)
+  
+# Detailstatistik zu Deletions
+  detailsDeletions <- analyzeSetDels
+  
+  getMHCluster <- function(x) {
+    if(x == 0) return(0)
+    if(x == 1) return(1)
+    if(x == 2) return(2)
+    if(x == 3) return(3)
+    if(x == 4) return(4)
+    if(x == 5) return(5)
+    if(x == 6) return(6)
+    if(x == 7) return(7)
+    if(x == 8) return(8)
+    if(x == 9) return(9)
+    if(x >= 10) return("mind. 10")
+  }
+  getDelSizeCluster <- function(x) {
+    if(x < 10) return("0-9")
+    if(x >= 10) return("mind. 10")
+  }
+  getDelCluster <- function(x) {
+    if(x[1] == 0) {
+      if(x[2] == "mind. 10")  {return("Rep. ohne MH, Del >= 10 BP")}
+      else                    {return("Rep. ohne MH, Del < 10 BP")}
+    } 
+    else return(paste("Rep. mit MH ",x[1]," BP")) 
+  }
+  
+  detailsDeletions[["MHSizeCluster"]] <- apply(detailsDeletions["MHSize"],1,function(x) getMHCluster(x))
+  detailsDeletions[["DelSizeCluster"]] <- apply(detailsDeletions["delLength"],1,function(x) getDelSizeCluster(x))
+  detailsDeletions[["DelCluster"]] <- apply(detailsDeletions[,c("MHSizeCluster","DelSizeCluster")],1,function(x) getDelCluster(x))
+  delDetailStatistic <- summarise(group_by(detailsDeletions,DelCluster),Anzahl = n(),Reads = sum(Count))
+  delDetailStatistic2 <- summarise(group_by(detailsDeletions,MHSizeCluster,DelSizeCluster),Anzahl = n(),Reads = sum(Count))
+  delDetailStatistic2 <- data.frame(delDetailStatistic2)
+  #View(detailsDeletions)
+  #View(delDetailStatistic)
+  #View(delDetailStatistic2)
+  
+  
+# Gesamtstatistik verifizieren und finalisieren 
+  print("Finalizing Stats")
+  stats[["CheckGesamtSumme"]] <- c(
+    stats[1,"Gesamt"] == stats[1,"Wildtyp"] +stats[1,"InDels"] +stats[1,"Insertions"] + stats[1,"Deletions"], 
+    stats[2,"Gesamt"] == stats[2,"Wildtyp"] +stats[2,"InDels"] +stats[2,"Insertions"] + stats[2,"Deletions"]
+  )
+  stats[["CheckInsStatistic"]] <- c(
+    stats[1,"Insertions"] == sum(insStatistic$Anzahl),
+    stats[2,"Insertions"] == sum(insStatistic$Reads)
+  )
+  stats[["CheckDelStatistic"]] <- c(
+    stats[1,"Deletions"] == sum(delStatistic$Anzahl),
+    stats[2,"Deletions"] == sum(delStatistic$Reads)
+  )
+  #View(stats)
+  
+
+# Datei-Exporte
+  print("Prepare Exporting")
+  exportExcelFileName <- paste(importFileName,".xlsx",sep="")
+  
+  wb <- createWorkbook()
+  
+  addWorksheet(wb, "Gesamtstatistik")
+  addWorksheet(wb, "insStatistic")
+  addWorksheet(wb, "delStatistic")
+  addWorksheet(wb, "delDetailStatistic")
+  addWorksheet(wb, "delDetailStatistic2")
+  addWorksheet(wb, "InDels")
+  addWorksheet(wb, "Deletions")
+  addWorksheet(wb, "Insertions")
+  addWorksheet(wb, "DeletionsDetails")
+  
+  writeData(wb, "Gesamtstatistik", stats)
+  writeData(wb, "insStatistic", insStatistic)
+  writeData(wb, "Insertions", resultIns)
+  writeData(wb, "insStatistic", ins2Statistic, startCol = 5, startRow = 1)
+  writeData(wb, "delStatistic", delStatistic)
+  writeData(wb, "delStatistic", del2Statistic, startCol = 5, startRow = 1)
+  writeData(wb, "delDetailStatistic", delDetailStatistic)
+  writeData(wb, "delDetailStatistic2", delDetailStatistic2)
+  writeData(wb, "InDels", resultInDels)
+  writeData(wb, "Deletions", resultTrueDels)
+  writeData(wb, "DeletionsDetails", analyzeSetDels)
+  
+  print(paste('Start Exporting to ',file.path(exportFolder, exportExcelFileName)))
+  saveWorkbook(wb, file.path(exportFolder, exportExcelFileName), overwrite = TRUE)
+  print('Exporting finished')
+  
+print('Execution Finished')  
+  
+# Some Help & Reference
+
+#grep(delPattern,result[13440,3])
+#str_count(result[13440,3],delPattern)
+#result2 <- within(result,{NeueSpalte <- result$X.ID})
+#We write a little function, which uses the str_extract function to use regular Expression
+#Splitter = function(x) substr(str_extract(x,'\\((19|20)\\d{2}'),2,5)
+#output <- within(dataset,{ValidEmail=isValidEmail(dataset$Email)})
+
+
+#https://regex101.com/
+#https://www.regular-expressions.info/refext.html
+
+# [TAGC]+?([-]+)[TAGC]*?
